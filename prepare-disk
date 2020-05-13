@@ -1,0 +1,139 @@
+#!/bin/sh
+#
+# Prepares the disk to be used by snoboot
+#
+# --init and --init-secure:
+# The disk is partitioned, and a bootloader is installed.
+# All data on the device will be lost!
+#
+# --update:
+# Updates the bootloader and scripts
+
+print_syntax() {
+  echo "Syntax: $0 --{init,init-secure,update} /dev/{sda|sdb|...|hda|hdb|...}" >&2
+}
+
+print_help() {
+  print_syntax
+  cat >&2 <<EOT
+
+Prepares the given disk to be used by a snoboot system.
+All data on the device will be lost!
+
+The given disk will be partitioned as follows:
+- GPT partition scheme with MBR boot sector (syslinux)
+- Partition 1 = boot (syslinux, will boot into ipxe)
+- Partition 2 = swap (1 GB)
+- Partition 3 = data (remaining disk space)
+
+Options:
+  --init         Initialize partitions
+  --init-secure  Initialize partitions; write random data to device before partitioning
+  --update       Only update the bootloader and scripts (mostly non-destructive)
+EOT
+} 
+
+if [ $# -lt 1 ]; then
+  print_syntax
+  exit 1
+fi
+
+device=
+init=
+while [ $# -gt 0 ]; do
+case "$1" in
+  /dev/[hs]d[a-z])
+    device="$1"
+    ;;
+  -h|--help)
+    print_help
+    exit 0
+    ;;
+  --init)
+    init=1
+    ;;
+  --init-secure)
+    init=2
+    ;;
+  --update)
+    init=0
+    ;;
+  *)
+    echo "Illegal argument: $1" >&2
+    exit 1
+    ;;
+esac
+shift
+done
+
+if [ -z "$init" ]; then
+  print_syntax
+  exit 1 
+fi
+
+if [ ! -b "$device" ]; then
+  echo "Device not found: $device" >&2
+  exit 1
+fi
+
+mount | grep -q -w /mnt
+if [ $? -eq 0 ]; then
+  echo "Error: Please unmount /mnt" >&2
+  exit 1
+fi
+
+set -e
+
+if [ $init -gt 0 ]; then
+  echo "Using device: $device"
+  if [ $init -gt 1 ]; then
+    echo "Writing random data to $device. This can take a while..."
+    haveged -n 0 | dd of="$device"
+  fi
+
+  echo "Writing partition table"
+  sgdisk --zap --clear --new 1:8192:+100M -c 1:boot -t 1:8300 --attributes=1:set:2 --new 2:+0:+1G -c 2:swap -t 2:8200 --new 3:+0:0 -c 3:data -t 3:fd00 "$device"
+
+  echo "Formatting boot partition (ext4)"
+  mkfs.ext4 "$device"1
+fi
+
+cd "$(dirname $0)"
+
+gptmbr=
+for f in \
+  gptmbr.bin \
+  /usr/share/syslinux/gptmbr.bin \
+  /usr/lib/syslinux/bios/gptmbr.bin \
+  /usr/lib/syslinux/mbr/gptmbr.bin \
+  /usr/lib/syslinux/gptmbr.bin \
+  /usr/lib/SYSLINUX/gptmbr.bin \
+; do
+  if [ -e "$f" ]; then
+    gptmbr="$f"
+    break
+  fi
+done
+if [ -z "$gptmbr" ]; then
+  echo "Error: Could not find gptmbr.bin" >&2
+  exit 1
+fi
+
+echo "Installing boot loader: $gptmbr"
+dd bs=440 count=1 conv=notrunc if="$gptmbr" of="$device"
+
+echo "Installing syslinux (extlinux)"
+mount -t ext4 /dev/sda1 /mnt
+extlinux --install /mnt
+cp syslinux.cfg /mnt/
+
+echo "Installing iPXE"
+if [ ! -e "ipxe.lkrn" ]; then
+  # Download snoboot iPXE binary
+  wget https://github.com/snoboot/snoboot-ipxe-build/releases/download/test/ipxe.lkrn
+fi
+cp ipxe.lkrn /mnt/
+umount /mnt
+
+echo
+echo "Success! You may now prepare more disks, or reboot the machine."
