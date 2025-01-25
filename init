@@ -4,42 +4,18 @@
 #
 
 which apk >/dev/null 2>&1
-if [ $? -eq 0 ]; then
-  echo "Detected environment: Alpine Linux (apk)"
-  set -e -x
-
-  # Setup APK repositories if necessary
-  grep -q http /etc/apk/repositories || setup-apkrepos
-
-  # Uncomment the first commented line in /etc/apk/repositories, which should be the community repository
-  sed -E '1,/#/s/#//' /etc/apk/repositories -i""
-
-  # Install required packages 
-  apk add haveged gptfdisk sgdisk e2fsprogs syslinux
-  
-  exit 0
+if [ $? -ne 0 ]; then
+  echo "Alpine Linux required" >&2
+  exit 1
 fi
 
-which pacman >/dev/null 2>&1
-if [ $? -eq 0 ]; then
-  echo "Detected environment: Arch Linux (pacman)"
-  set -e -x
+set -e -x
 
-  pacman -Sy haveged gdisk e2fsprogs syslinux
-  
-  exit 0
-fi
+# Setup APK repositories if necessary
+grep -q http /etc/apk/repositories || setup-apkrepos
 
-which apt >/dev/null 2>&1
-if [ $? -eq 0 ]; then
-  echo "Detected environment: Debian (apt)"
-  set -e -x
+# Uncomment the first commented line in /etc/apk/repositories, which should be the community repository
+sed -E '1,/#/s/#//' /etc/apk/repositories -i""
 
-  apt update
-  apt install haveged gdisk e2fsprogs syslinux extlinux
-
-  exit 0
-fi
-
-echo "Error: Unsupported environment" >&2
-exit 1
+# Install required packages 
+apk add haveged gptfdisk sgdisk
