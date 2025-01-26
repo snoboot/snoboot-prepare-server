@@ -1,0 +1,82 @@
+#!/bin/zsh
+
+if [[ $# -eq 0 ]]; then
+  print "Syntax: $(basename $0) /dev/mapper/snoboot-luks-*..." >&2
+  print "Available devices: " >&2
+  ls -1 /dev/mapper/snoboot-luks-* >&2
+  exit 1
+fi
+
+if [[ "$(whoami)" != "root" ]]; then
+  print "Error: Please run as root" >&2
+  exit 1
+fi
+
+which pvcreate >/dev/null 2>&1 || apk add lvm2
+which mkfs.xfs >/dev/null 2>&1 || apk add xfsprogs
+
+for md in $@; do
+  print -- "- $md"
+  case "$md" in
+    /dev/mapper/snoboot-luks-*) 
+       if [[ ! -e "$md" ]]; then
+         print "Error: Not a valid device" >&2
+         exit 1
+       fi
+       ;;
+    *) print "Error: Not a /dev/mapper/snoboot-luks- device" >&2
+       exit 1
+  esac
+  blkidRes=$(blkid "$md")
+  if [[ -n "$blkidRes" ]]; then
+    print "Warning: Device may have existing file system: $d" >&2
+    print -- $blkidRes | cut -d' ' -f2-
+  fi
+done
+
+while [[ 1 ]]; do
+read "?Proceed with filesystem creation? (y/n) " ask
+case "$ask" in
+  y|yes) break ;;
+  n|no) echo "Aborted" >&2; exit 1 ;;
+  *) continue
+esac
+done
+
+for md in $@; do
+  basename=$(basename "$md")
+  vgname="gfs-vg-$basename"
+
+  if [[ -e "/dev/$vgname" ]]; then
+    for lv in $(ls /dev/$vgname/); do
+      lvremove -ff "$lv"
+    done
+    vgremove -ff "$vgname" || true
+    pvremove -ff "$md"
+  fi
+
+  pvcreate --dataalignment 256K "$md"
+  pvsize=$(pvs --noheadings --segments -o pv_size --units T --unquoted "$md")
+  echo pvsize=$pvsize
+
+  vgcreate --physicalextentsize 256K "$vgname" "$md"
+
+  lvcreate -l "100%FREE" --zero n --chunksize 256K --thinpool "$vgname/gfs_pool" --poolmetadatasize 16776960K
+
+  poolDev="/dev/$vgname/gfs_pool"
+  if [[ ! -e "$poolDev" ]]; then
+    echo "Error: Pool device not found: $poolDev" >&2
+    exit 1
+  fi
+
+  print
+  print "**** Creating XFS filesystem on $poolDev..."
+  mkfs.xfs -i size=512 -n size=8192 -d su=256k,sw=1 "$poolDev"
+  print
+
+  brickDir="/data/brick-$basename"
+  mkdir -p "$brickDir"
+  print "---- Mounting at $brickDir..."
+  mount -t xfs "$poolDev" "$brickDir"
+done
+
