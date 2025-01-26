@@ -76,7 +76,7 @@ for md in $@; do
 
   brickDir="/data/brick-$basename"
   mkdir -p "$brickDir"
-  print "---- Mounting at $brickDir..."
+  print -- "---- Mounting at $brickDir..."
   mount -t xfs "$poolDev" "$brickDir"
 done
 
