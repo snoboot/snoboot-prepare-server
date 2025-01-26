@@ -1,0 +1,242 @@
+#!/bin/zsh
+
+if [[ $# -eq 0 ]]; then
+  print "Syntax: snoboot-luks-encrypt /dev/disk/by-id/*..." >&2
+  print "Available devices: " >&2
+  ls -1 /dev/disk/by-id/ >&2
+  exit 1
+fi
+
+if [[ "$(whoami)" != "root" ]]; then
+  print "Error: Please run as root" >&2
+  exit 1
+fi
+
+set -e
+if ! pgrep haveged > /dev/null; then
+  apk add haveged
+  service haveged restart
+fi
+
+for cmd in cryptsetup sgdisk; do
+  which "$cmd" >/dev/null || apk add "$cmd"
+done
+which udevadm >/dev/null || apk add "eudev"
+
+declare -a devices
+for d in $@; do
+  case "$d" in
+    /dev/disk/by-id/*)
+      devices+=("$d")
+    ;;
+  *)
+    prefix=/dev/disk/by-id
+    if [[ -e "$prefix/$d" ]]; then
+      d="$prefix/$d"
+      devices+=("$d")
+    else
+      print "Error: Not a valid device path under /dev/disk/by-id/: $d" >&2
+      exit 1
+    fi
+  esac
+done
+
+benchmarkDoneMarker="$HOME/.cryptsetup-benchmark-done"
+if [[ ! -f "$benchmarkDoneMarker" ]]; then
+  print "Verify that encryption is fast enough:"
+  cryptsetup benchmark -c aes-xts-plain64
+  touch "$benchmarkDoneMarker"
+fi
+
+mkdir -p /etc/snoboot-luks
+chmod 700 /etc/snoboot-luks
+chown root:root /etc/snoboot-luks
+cryptkey="/etc/snoboot-luks/cryptkey"
+if [[ ! -f "$cryptkey" ]]; then
+  print "Warning: cryptkey not found $cryptkey, will create one" >&2
+fi
+
+function read_passphrase() {
+  read -s "?Enter $1 passphrase> " passphrase
+  read -s "?"$'\n'"Enter $1 passphrase again> " passphraseAgain
+  if [[ "$passphrase" != "$passphraseAgain" ]]; then
+    print "Inputs don't match" >&2
+    return 1
+  fi
+  if [[ -z "$passphrase" ]]; then
+    print "Passphrase is empty" >&2
+    return 1
+  fi
+  if [[ ${#passphrase} -lt 8 ]]; then
+    print "Passphrase too short" >&2
+    return 1
+  fi
+  echo $passphrase
+  return 0
+}
+
+local passphrase
+local recoveryPassphrase
+while [[ 1 ]]; do
+  passphrase=$(read_passphrase "boot") && break
+done
+print
+while [[ 1 ]]; do
+  recoveryPassphrase=$(read_passphrase "recovery") && break
+done
+print
+if [[ "$passphrase" == "$recoveryPassphrase" ]]; then
+  echo $passphrase
+  echo $recoverPassphrase
+  print "Error: Boot passphrase and recovery passphrase must differ" >&2
+  exit 1
+fi
+
+declare -a success
+for loop in 1 2; do
+  if [[ $loop -eq 2 ]]; then
+    print
+    print "IMPORTANT! This is the final warning. Do you want to proceed modifying the following devices?"
+    print -l ${devices[@]} | awk '{ print "  - " $0 }'
+    while [[ 1 ]]; do
+      print
+      read "?Proceed with partitioning? (y/n) " ask
+      case "$ask" in
+        y|yes) break ;;
+        n|no) print "Aborted"; exit 1; ;;
+        *) ;;
+      esac
+    done
+  fi
+  dn=1
+for d in ${devices[@]}; do
+  print
+  if [[ $loop -eq 1 ]]; then
+    print "**** CHECKING DEVICE ${dn} of ${#devices} $d"
+  else
+    print "!!!! MODIFYING DEVICE ${dn} of ${#devices} $d"
+  fi
+  dn=$(( $dn + 1 ))
+  blkidRes=$(blkid $d)
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    print "Error: blkid returned rc=$?" >&2
+    print "$blkidRes" >&2
+    exit 1
+  fi
+
+  partitions=$(setopt +o nomatch ; ls "$d"-part* 2>/dev/null || true)
+  if [[ $loop -eq 1 ]]; then
+    if [[ -n "$blkidRes" ]]; then
+      print "Warning: Device may have existing file system: $d" >&2
+      print -- $blkidRes | cut -d' ' -f2-
+    fi
+    if [[ -n "$partitions" ]]; then
+      print "Warning: Device has existing partitions: $d" >&2
+      print -l $partitions | awk '{ print "  - " $0 }'
+    fi
+  fi
+
+  declare -A devprops
+  for x in $(udevadm info --query=all --name="$d" | grep "^E: " | cut -c3-); do
+    k=${x%=*}
+    v=${x#*=}
+    devprops[$k]="$v"
+  done
+  if [[ "${devprops[DEVTYPE]}" != "disk" ]]; then
+    print "Error: Currently only disks, not partitions, are supported" >&2
+    exit 1
+  fi
+  disk="$d"
+  serial=
+  for k in ID_SERIAL ID_SERIAL_SHORT; do
+    p=${devprops[$k]}
+    [[ -n "$p" ]] && serial="$p"
+  done
+
+  blocksize=$(blockdev --getbsz "$disk")
+  sectorsize=$(blockdev --getss "$disk")
+  if [[ $sectorsize -lt 4096 ]]; then
+    sectorsize=4096
+  fi
+  alignmentsize=1048576
+  if [[ $blocksize -gt $alignmentsize ]]; then
+    alignmentsize=$blocksize
+  fi
+  if [[ $loop -eq 1 ]]; then
+    print "sectorsize=$sectorsize"
+    print "vendor=${devprops[ID_VENDOR]}"
+    print "model=${devprops[ID_MODEL]}"
+    print "serial=$serial"
+    print "blocksize=$blocksize"
+    print "sectorsize_adjusted=$sectorsize"
+    print "alignmentsize=$alignmentsize"
+
+    out=$(cryptsetup luksDump "$disk"-part2 2>/dev/null || true)
+    if [[ -n "$out" ]]; then
+      print "Warning: Device contains LUKS partition!" >&2
+    fi
+
+    while [[ 1 ]]; do
+      read "?Is this the correct device? (y/n) " ask
+      case "$ask" in
+        y|yes) break ;;
+        n|no) print "Aborted"; exit 1; ;;
+        *) ;;
+      esac
+    done
+    continue
+  fi
+  if [[ -z "$serial" ]]; then
+    print "Error: Could not determine serial number" >&2
+    exit 1
+  fi
+
+  # 8300 Linux file system
+  # 8200 Linux swap (unencrypted)
+  # 8309 Linux LUKS
+  # 8e00 Linux LVM
+  sgdisk --zap-all "$disk"
+  end_position=$(sgdisk -E "$disk" | tail -n 1)
+  sgdisk --clear --set-alignment="$alignmentsize" \
+    --new 1:$alignmentsize:+1G -c "1:snoboot-swap" -t 1:8309 \
+    --new 2:+0:$(( $end_position - ($end_position + 1) % 2048 )) -c "2:snoboot-${serial}" -t 2:8309 \
+    "$disk"
+  end_position=$(sgdisk -E "$disk")
+
+  sleep 1
+  partprobe "$disk" | (sleep 5 ; partprobe "$disk")
+  udevadm trigger
+  udevadm settle
+
+  if [[ ! -e "$cryptkey" ]]; then
+    touch "$cryptkey"
+    chmod 600 "$cryptkey"
+    print "Creating cryptkey: $cryptkey"
+    dd bs=32 count=1 if=/dev/random of="$cryptkey" iflag=fullblock
+  fi
+
+  dev="${disk}-part2"
+  label="snoboot-${serial}"
+  if [[ $loop -eq 1 ]]; then
+    print "partition=$dev"
+    print "label=$label"
+  fi
+
+  echo "YES" | cryptsetup -v --label "${label}" --sector-size "$sectorsize" -c aes-xts-plain64 -h sha256 --key-size 256 luksFormat "${dev}" /etc/snoboot-luks/cryptkey
+  yes "$recoveryPassphrase" | cryptsetup luksAddKey "$dev" --key-file /etc/snoboot-luks/cryptkey
+  yes "$passphrase" | cryptsetup luksAddKey "$dev" --key-file /etc/snoboot-luks/cryptkey
+  backupFile="/etc/snoboot-luks/snoboot-luks-${serial}.header-bak"
+  rm -f "$backupFile"
+  cryptsetup luksHeaderBackup  --header-backup-file "$backupFile" "${dev}"
+
+  success+=("$dev")
+done
+done
+
+print
+print "DONE. Encrypted LUKS partitions:"
+print -l ${success[@]} | awk '{ print "  - " $0 }'
+print
+print "IMPORTANT! Make sure to save /etc/snoboot-luks/*.header-bak files on a backup device"
+
