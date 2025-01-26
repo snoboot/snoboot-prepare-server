@@ -14,8 +14,4 @@ set -e -x
 # Setup APK repositories if necessary
 grep -q http /etc/apk/repositories || setup-apkrepos
 
-# Uncomment the first commented line in /etc/apk/repositories, which should be the community repository
-sed -E '1,/#/s/#//' /etc/apk/repositories -i""
-
-# Install required packages 
-apk add haveged gptfdisk sgdisk
+sudo apk add zfs
