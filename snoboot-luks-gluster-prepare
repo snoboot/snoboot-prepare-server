@@ -56,14 +56,21 @@ for md in $@; do
   fi
 
   pvcreate -ff --yes --dataalignment 256K "$md"
-  pvsize=$(pvs --noheadings --segments -o pv_size --units T --unquoted "$md")
-  echo pvsize=$pvsize
 
   vgcreate --physicalextentsize 256K "$vgname" "$md"
 
-  lvcreate -l "100%FREE" --zero n --chunksize 256K --thinpool "$vgname/gfs_pool" --poolmetadatasize 16776960K
-  poolsize=$(lvs -o lv_size --noheadings --unit b "$vgname/gfs_pool" | tr -d ' ')
-  lvcreate -V "$poolsize" --thin --name "gfs_lv" "$vgname/gfs_pool"
+  # give 5% space for snapshots (5% of 4TB are 200 GB)
+  lvcreate -l "95%FREE" --zero n --chunksize 256K --thinpool "$vgname/gfs_pool" --poolmetadatasize 16776960K
+  
+  lvsize=$(lvs -o lv_size --units b --no-heading "$vgname/gfs_pool" | tr -d ' B')
+  if [[ -z "$lvsize" ]]; then
+    echo "Error: Could not determine lvsize" >&2
+    exit 1
+  fi
+  # adjust virtual size by 16 GB (used for pool metadata)
+  virtualsize=$(( $lvsize / 1024 / 1024 - 16 * 1024 ))
+
+  lvcreate --virtualsize "${virtualsize}M" --thin --name "gfs_lv" --thinpool "$vgname/gfs_pool"
 
   lvDev="/dev/$vgname/gfs_lv"
   if [[ ! -e "$lvDev" ]]; then
