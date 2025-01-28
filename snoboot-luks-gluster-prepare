@@ -55,28 +55,34 @@ for md in $@; do
     pvremove -ff "$md"
   fi
 
-  pvcreate --dataalignment 256K "$md"
+  pvcreate -ff --yes --dataalignment 256K "$md"
   pvsize=$(pvs --noheadings --segments -o pv_size --units T --unquoted "$md")
   echo pvsize=$pvsize
 
   vgcreate --physicalextentsize 256K "$vgname" "$md"
 
   lvcreate -l "100%FREE" --zero n --chunksize 256K --thinpool "$vgname/gfs_pool" --poolmetadatasize 16776960K
+  poolsize=$(lvs -o lv_size --noheadings --unit b "$vgname/gfs_pool" | tr -d ' ')
+  lvcreate -V "$poolsize" --thin --name "gfs_lv" "$vgname/gfs_pool"
 
-  poolDev="/dev/$vgname/gfs_pool"
-  if [[ ! -e "$poolDev" ]]; then
-    echo "Error: Pool device not found: $poolDev" >&2
+  lvDev="/dev/$vgname/gfs_lv"
+  if [[ ! -e "$lvDev" ]]; then
+    echo "Error: LV device not found: $lvDev" >&2
     exit 1
   fi
 
   print
-  print "**** Creating XFS filesystem on $poolDev..."
-  mkfs.xfs -i size=512 -n size=8192 -d su=256k,sw=1 "$poolDev"
+  print "**** Creating XFS filesystem on $lvDev..."
+  mkfs.xfs -i size=512 -n size=8192 -d su=256k,sw=1 "$lvDev"
   print
 
-  brickDir="/data/brick-$basename"
-  mkdir -p "$brickDir"
-  print -- "---- Mounting at $brickDir..."
-  mount -t xfs "$poolDev" "$brickDir"
+  brickDir=$(mktemp -d -p /data ".slgp.XXXXXXXX")
+  print -- "---- Mounting at $brickDir and creating gv0 directory..."
+  mount -t xfs "$lvDev" "$brickDir"
+  mkdir -p "$brickDir/gv0"
+  print -- "---- Unmounting"
+  umount "$brickDir"
+  rmdir "$brickDir"
+  print -- "---- Done with $lvDev"
 done
 
