@@ -1,0 +1,64 @@
+#!/bin/zsh
+
+if [[ $# -eq 0 ]]; then
+  print "Syntax: $(basename $0) /dev/mapper/snoboot-luks-*..." >&2
+  print "Available devices: " >&2
+  ls -1 /dev/mapper/snoboot-luks-* >&2
+  exit 1
+fi
+
+if [[ "$(whoami)" != "root" ]]; then
+  print "Error: Please run as root" >&2
+  exit 1
+fi
+
+which uuidgen >/dev/null 2>&1 || apk add uuidgen
+which mkfs.btrfs >/dev/null 2>&1 || apk add btrfs-progs
+
+for md in $@; do
+  print -- "- $md"
+  case "$md" in
+    /dev/mapper/snoboot-luks-*) 
+       if [[ ! -e "$md" ]]; then
+         print "Error: Not a valid device" >&2
+         exit 1
+       fi
+       ;;
+    *) print "Error: Not a /dev/mapper/snoboot-luks- device" >&2
+       exit 1
+  esac
+  blkidRes=$(blkid "$md")
+  if [[ -n "$blkidRes" ]]; then
+    print "Warning: Device may have existing file system: $d" >&2
+    print -- $blkidRes | cut -d' ' -f2-
+  fi
+done
+
+while [[ 1 ]]; do
+read "?Proceed with filesystem creation? (y/n) " ask
+case "$ask" in
+  y|yes) break ;;
+  n|no) echo "Aborted" >&2; exit 1 ;;
+  *) continue
+esac
+done
+
+mkdir -p /data
+set -e
+modprobe btrfs
+echo mds=$@
+uuid=$(uuidgen)
+echo UUID=$uuid
+mkfs.btrfs -s 4096 --uuid "$uuid" -L snoboot-Kluster -O quota --metadata raid1 --data raid0 --force $@
+
+brickDir=$(mktemp -d -p /data ".slgp.XXXXXXXX")
+print -- "---- Mounting $uuid at $brickDir and creating gv0 directory..."
+mount -t btrfs UUID="$uuid" "$brickDir"
+cd "$brickDir"
+btrfs subvolume create "gv0"
+cd - 
+print -- "---- Unmounting"
+umount "$brickDir"
+rmdir "$brickDir"
+print -- "---- Done with $uuid / $@"
+
